@@ -23,8 +23,12 @@ class DingTalkClient:
 
 
     def get_access_token(self):
-        """Get Access Token, refresh if expired."""
+        """
+        Get Access Token, refresh if expired.
+        """
+        # RAM Cache Check
         if self.access_token and time.time() < self.token_expires_at:
+            # logger.debug("Using cached AccessToken")
             return self.access_token
 
         url = "https://oapi.dingtalk.com/gettoken"
@@ -38,8 +42,8 @@ class DingTalkClient:
             if data.get("errcode") == 0:
                 self.access_token = data["access_token"]
                 # Expires in 7200s, refresh 5 mins early
-                self.token_expires_at = time.time() + data["expires_in"] - 300
-                logger.info("Successfully obtained AccessToken")
+                self.token_expires_at = time.time() + data.get("expires_in", 7200) - 300
+                logger.info("Successfully obtained AccessToken (refreshed)")
                 return self.access_token
             else:
                 logger.error(f"Failed to get AccessToken: {data}")

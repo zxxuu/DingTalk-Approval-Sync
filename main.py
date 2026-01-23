@@ -12,7 +12,8 @@ from db import (
     create_table_if_not_exists, 
     upsert_process_instance, 
     upsert_dingtalk_users, 
-    get_user_name_from_db
+    get_user_name_from_db,
+    get_instance_status
 )
 from dingtalk_client import DingTalkClient
 
@@ -125,6 +126,14 @@ def transform_process_instance(instance_data, forced_id=None):
 def sync_single_instance(process_instance_id):
     """Fetch and sync a single instance."""
     try:
+        # Idempotency Check
+        # If instance exists and is already in a final state, skip sync.
+        # Final states: COMPLETED, TERMINATED
+        existing_status = get_instance_status(process_instance_id)
+        if existing_status in ['COMPLETED', 'TERMINATED']:
+            logger.info(f"Skipping {process_instance_id} (Already {existing_status})")
+            return
+
         detail = dt_client.get_process_instance_detail(process_instance_id)
         if not detail:
             logger.warning(f"Could not fetch details for {process_instance_id}")
@@ -178,9 +187,19 @@ def sync_users():
 
 # --- Stream Mode Handlers ---
 
+class BPMSHandler:
+    def pre_start(self):
+        pass
+        
+    async def process(self, event):
+        """
+        Handle the event.
+        """
+        return on_bpms_instance_change(event)
+
 def on_bpms_instance_change(event):
     """
-    Callback for bpms_instance_change event.
+    Callback logic for bpms_instance_change event.
     """
     try:
         # data is usually in event.data (depending on SDK version, sometimes event.message)
@@ -212,7 +231,7 @@ def start_stream_mode():
     client = DingTalkStreamClient(credential)
     
     # Register callback for approval instance changes
-    client.register_callback_handler("bpms_instance_change", on_bpms_instance_change)
+    client.register_callback_handler("bpms_instance_change", BPMSHandler())
     
     logger.info("Stream Client Initialized. Listening for events...")
     client.start_forever()

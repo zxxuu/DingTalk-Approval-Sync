@@ -193,4 +193,23 @@ def get_user_name_from_db(userid):
         conn.close()
     return None
 
-
+def get_instance_status(process_instance_id):
+    """
+    Check if an instance exists and return its status.
+    Returns: status string (e.g. 'COMPLETED', 'RUNNING') or None if not found.
+    """
+    if not process_instance_id:
+        return None
+        
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT status FROM `process_instance` WHERE process_instance_id = %s", (process_instance_id,))
+            result = cursor.fetchone()
+            if result:
+                return result['status']
+    except Exception as e:
+        logger.error(f"Error checking instance status: {e}")
+    finally:
+        conn.close()
+    return None
