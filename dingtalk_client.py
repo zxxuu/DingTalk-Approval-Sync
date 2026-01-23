@@ -71,10 +71,8 @@ class DingTalkClient:
                     dept_id = dept['dept_id']
                     all_dept_ids.append(dept_id)
                     # Recursively fetch sub-departments
-                    # sub_ids = self.get_department_list_ids(dept_id)
-                    # all_dept_ids.extend(sub_ids)
-                # Optimization: For finding just one user, we don't need deep recursion if root has users.
-                # But to be safe let's just return direct children.
+                    sub_ids = self.get_department_list_ids(dept_id)
+                    all_dept_ids.extend(sub_ids)
                 return all_dept_ids
             else:
                 logger.error(f"Failed to get departments: {data}")
@@ -94,24 +92,29 @@ class DingTalkClient:
         payload = {
             "dept_id": dept_id,
             "cursor": 0,
-            "size": 20
+            "size": 100
         }
         
         all_users = []
-        try:
-            response = requests.post(url, params=params, json=payload)
-            data = response.json()
-            if data.get("errcode") == 0:
-                result = data.get("result", {})
-                users = result.get("list", [])
-                for u in users:
-                    all_users.append({'userid': u['userid'], 'name': u['name']})
-            else:
-                # Some depts might be empty or restricted, just log warning
-                logger.warning(f"Failed to get users for dept {dept_id}: {data}")
-        except Exception as e:
-            logger.error(f"Error getting users: {e}")
-            raise
+        while True:
+            try:
+                response = requests.post(url, params=params, json=payload)
+                data = response.json()
+                if data.get("errcode") == 0:
+                    result = data.get("result", {})
+                    users = result.get("list", [])
+                    for u in users:
+                        all_users.append({'userid': u['userid'], 'name': u['name']})
+                    
+                    if not result.get("has_more"):
+                        break
+                    payload["cursor"] = result.get("next_cursor")
+                else:
+                    logger.warning(f"Failed to get users for dept {dept_id}: {data}")
+                    break
+            except Exception as e:
+                logger.error(f"Error getting users: {e}")
+                raise
         return all_users
 
     def get_user_visible_process_codes(self, userid):

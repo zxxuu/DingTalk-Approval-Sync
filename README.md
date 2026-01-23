@@ -1,58 +1,102 @@
-# DingTalk Attendance Sync Script
+# DingTalk Approval Process Sync
 
-This project synchronizes DingTalk attendance data to a local MySQL database.
+This repository contains a tool to synchronize DingTalk Approval Process data to a local MySQL database.
+It supports **Real-time Sync** (Stream Mode) and **Historical Data Sync** (Batch Mode).
 
-## Features
-- **Batch Export**: Efficiently fetches attendance data for all users using the `attendance/list` API.
-- **Recursive User Fetching**: Automatically finds all users in all sub-departments.
-- **Data Completeness**: Injects user names into the attendance records (as the API does not provide them).
-- **Database Sync**: Upserts records to MySQL, preventing duplicates.
+## Key Features
+
+- **Data Enrichment**:
+  - **Name Resolution**: Automatically converts User IDs to Names (Originator & Current Approvers).
+  - **Current Approvers**: Parses `RUNNING` tasks to identify who is currently holding up the approval.
+  - **Full Form Data**: Saves complete form component values as JSON.
+- **Dual Sync Modes**:
+  - **Stream**: Real-time listeners for immediate updates.
+  - **History**: Batch download for past records.
+- **Local Cache**: Uses a local `dingtalk_user` table to cache employee info, reducing API limits.
+- **Multi-template**: Supports syncing multiple process codes simultaneously.
 
 ## Prerequisites
-- Python 3.x
-- MySQL Database
+
+- Python 3.8+
+- MySQL 5.7+
+- DingTalk App Credentials
 
 ## Installation
 
-1.  **Install Dependencies**:
-    ```bash
-    pip install -r requirements.txt
-    ```
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-2.  **Configuration**:
-    Create a `.env` file in the root directory with the following content:
-    ```ini
-    # DingTalk Credentials
-    DINGTALK_CLIENT_ID=your_app_key
-    DINGTALK_CLIENT_SECRET=your_app_secret
+2. Configure `.env`:
+   ```properties
+   DINGTALK_CLIENT_ID=your_app_key
+   DINGTALK_CLIENT_SECRET=your_app_secret
+   DB_HOST=localhost
+   DB_USER=root
+   DB_PASSWORD=password
+   DB_NAME=your_db
+   
+   PROCESS_CODE=PROC-XXXX,PROC-YYYY
+   ```
 
-    # Database Credentials
-    DB_HOST=localhost
-    DB_PORT=3306
-    DB_USER=root
-    DB_PASSWORD=your_password
-    DB_NAME=your_database_name
-    ```
+## User Guide
 
-3.  **Permissions**:
-    Ensure your DingTalk application has the following permissions:
-    - `qyapi_get_department_list` (通讯录只读权限)
-    - `qyapi_get_department_member` (通讯录只读权限)
-    - Attendance read permissions
-
-## Usage
-
-**Sync Last Month's Data (Default):**
+### Step 1: Sync User Directory (Required)
+To display names (e.g., "John Doe") instead of IDs, you must sync the company directory to the local database first.
 ```bash
-python main.py
+python main.py sync-users
+```
+*Tip: Run this weekly to keep the list updated.*
+
+### Step 2: Find Process Codes
+List all approval templates visible to you:
+```bash
+python main.py list-codes
 ```
 
-**Sync Specific Date Range:**
+### Step 3: Sync Data
+#### A. History Mode
+Download past data.
 ```bash
-python main.py 2024-11-01 2024-11-30
+# Default (Last Month)
+python main.py history
+
+# Custom Range
+python main.py history 2024-01-01 2024-01-31
+```
+**How Data is Processed**:
+1. Fetch raw JSON from DingTalk API.
+2. Extract `originator_userid` and the `tasks` list.
+3. **Originator Name**: Look up ID in local `dingtalk_user` table.
+4. **Current Approvers**: Scan `tasks` for `RUNNING` status, extract User IDs, and look up names in local table.
+5. **Storage**: Save resolved names into `originator_name` and `current_approvers` columns in MySQL.
+
+#### B. Stream Mode
+Listen for real-time events.
+```bash
+python main.py stream
 ```
 
-## Project Structure
-- `main.py`: Entry point. Handles date range, fetching, transformation, and saving.
-- `dingtalk_client.py`: Handles DingTalk API interactions (Token, Departments, Users, Attendance).
-- `db.py`: Handles Database connection, table creation, and record upsert.
+## Database Schema
+
+### `process_instance`
+Main approval records.
+
+| Field | Description | Source |
+| :--- | :--- | :--- |
+| `process_instance_id` | Unique ID | API Raw |
+| `title` | Title | API Raw |
+| `status` | Status (RUNNING, COMPLETED...) | API Raw |
+| `result` | Result (agree, refuse...) | API Raw |
+| `originator_name` | **Originator Name** | Derived (User Cache) |
+| `current_approvers` | **Current Approvers** | Derived (Tasks + User Cache) |
+| `form_component_values` | Form Data (JSON) | API Raw |
+
+### `dingtalk_user`
+Local user cache.
+
+| Field | Description |
+| :--- | :--- |
+| `userid` | DingTalk UserID |
+| `name` | User Name |

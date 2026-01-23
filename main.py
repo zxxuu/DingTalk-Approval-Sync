@@ -8,7 +8,12 @@ from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
 
 # Local modules
-from db import create_table_if_not_exists, upsert_process_instance
+from db import (
+    create_table_if_not_exists, 
+    upsert_process_instance, 
+    upsert_dingtalk_users, 
+    get_user_name_from_db
+)
 from dingtalk_client import DingTalkClient
 
 # DingTalk Stream SDK
@@ -32,6 +37,16 @@ def get_last_month_range():
     end_date = next_month.replace(day=1) - timedelta(days=1)
     return start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
 
+def get_user_name_cached(userid):
+    """
+    Get user name, try cache first. 
+    Note: For now we only read DB. Real-time fetch could be added if needed.
+    """
+    if not userid:
+        return None
+    name = get_user_name_from_db(userid)
+    return name if name else userid # Fallback to ID if name not found
+
 def transform_process_instance(instance_data, forced_id=None):
     """
     Transform API process instance detail to DB record format.
@@ -54,18 +69,57 @@ def transform_process_instance(instance_data, forced_id=None):
     
     pid = get_val(['process_instance_id', 'processInstanceId']) or forced_id
     
+    originator_userid = get_val(['originator_userid', 'originatorUserId'])
+    originator_name = get_user_name_cached(originator_userid)
+    
+    # Extract current approvers
+    # Tasks structure: "tasks": [ { "userid": "...", "status": "RUNNING" } ]
+    tasks = instance_data.get('tasks', [])
+    current_approver_ids = set()
+    
+    # Debug: Check if we have running tasks
+    # has_running = False
+    
+    for t in tasks:
+        # Check standard status field (usually 'status' or 'task_status')
+        # API usually returns 'task_status' for detailed tasks
+        status = (t.get('task_status') or t.get('status') or '').upper()
+        if status == 'RUNNING':
+            # has_running = True
+            uid = t.get('userid')
+            if uid:
+                current_approver_ids.add(uid)
+            else:
+                logger.warning(f"Found RUNNING task but no userid: {t}")
+    
+    # if not current_approver_ids and has_running:
+    #    logger.warning(f"Running tasks found but no approvers extracted. Tasks Dump: {json.dumps(tasks, ensure_ascii=False)}")
+    
+    current_approver_names = []
+    for uid in current_approver_ids:
+        name = get_user_name_cached(uid)
+        current_approver_names.append(name)
+
+    current_approvers_str = ",".join(current_approver_names) if current_approver_names else None
+
+    # Debug log for current approvers logic
+    # logger.info(f"Instance {pid} Status: {get_val('status')} | Found RUNNING tasks: {len(current_approver_ids)} | Approvers: {current_approvers_str}")
+    
     return {
         'process_instance_id': pid,
         'title': get_val('title'),
         'create_time': get_val(['create_time', 'createTime']),
         'finish_time': get_val(['finish_time', 'finishTime']),
-        'originator_userid': get_val(['originator_userid', 'originatorUserId']),
+        'originator_userid': originator_userid,
         'originator_dept_id': get_val(['originator_dept_id', 'originatorDeptId']),
         'status': get_val('status'),
         'result': get_val('result'),
         'business_id': get_val(['business_id', 'businessId']),
         'process_code': get_val(['process_code', 'processCode']),
-        'form_component_values': form_values
+        'form_component_values': form_values,
+        'originator_name': originator_name,
+        'current_approvers': current_approvers_str,
+        'tasks': tasks # Now we process and save this to DB
     }
 
 def sync_single_instance(process_instance_id):
@@ -79,10 +133,48 @@ def sync_single_instance(process_instance_id):
         # Pass the known ID to ensure it exists in the record
         record = transform_process_instance(detail, forced_id=process_instance_id)
         
+        # Temporary Debug: Print first few tasks or important fields
+        inst_status = record.get('status')
+        approvers = record.get('current_approvers')
+        
+        log_msg = f"Synced: {process_instance_id} | Status: {inst_status} | Approvers: {approvers} | Title: {record.get('title')}"
+        logger.info(log_msg)
+        
         upsert_process_instance(record)
-        logger.info(f" synced: {process_instance_id} - {record.get('title')}")
     except Exception as e:
         logger.error(f"Failed to sync instance {process_instance_id}: {e}")
+
+# --- User Sync ---
+
+def sync_users():
+    """
+    Fetch all users from DingTalk and save to DB.
+    """
+    logger.info("Starting User Sync...")
+    try:
+        # 1. Get all departments
+        logger.info("Fetching departments...")
+        dept_ids = dt_client.get_department_list_ids()
+        logger.info(f"Found {len(dept_ids)} departments.")
+
+        # 2. Get users for each department
+        all_users = []
+        for i, dept_id in enumerate(dept_ids):
+            users = dt_client.get_dept_users(dept_id)
+            all_users.extend(users)
+            if i % 10 == 0:
+                logger.info(f"Processed {i+1}/{len(dept_ids)} departments...")
+        
+        # Deduplicate
+        unique_users = {u['userid']: u for u in all_users}.values()
+        user_list = list(unique_users)
+        
+        logger.info(f"Found {len(user_list)} unique users. Upserting to DB...")
+        upsert_dingtalk_users(user_list)
+        logger.info("User Sync Completed.")
+        
+    except Exception as e:
+        logger.critical(f"Failed to sync users: {e}")
 
 # --- Stream Mode Handlers ---
 
@@ -196,6 +288,7 @@ def main():
         print("  python main.py history <start_date> <end_date> [process_code]")
         print("  python main.py history (defaults to last month)")
         print("  python main.py list-codes  <-- Use to find your PROCESS_CODE")
+        print("  python main.py sync-users  <-- Cache Users")
         return
 
     mode = sys.argv[1]
@@ -205,6 +298,9 @@ def main():
 
     elif mode == 'list-codes':
         list_process_codes()
+
+    elif mode == 'sync-users':
+        sync_users()
         
     elif mode == 'history':
         process_code_env = os.getenv('PROCESS_CODE', '')
