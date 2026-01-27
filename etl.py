@@ -20,7 +20,7 @@ def parse_component_list(components):
         
     for comp in components:
         # 1. Get basic info
-        c_type = comp.get('component_type')
+        c_type = comp.get('component_type') or comp.get('componentType')
         c_id = comp.get('id')
         # Some components use 'name', some use parameters in props. 
         # But usually 'name' or 'label' is available at top level or in props logic.
