@@ -20,6 +20,9 @@ from dingtalk_client import DingTalkClient
 # DingTalk Stream SDK
 from dingtalk_stream import DingTalkStreamClient, Credential
 
+# ETL
+from etl import parse_component_list
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -106,6 +109,9 @@ def transform_process_instance(instance_data, forced_id=None):
     # Debug log for current approvers logic
     # logger.info(f"Instance {pid} Status: {get_val('status')} | Found RUNNING tasks: {len(current_approver_ids)} | Approvers: {current_approvers_str}")
     
+    # Run ETL
+    form_values_cleaned = parse_component_list(form_values)
+
     return {
         'process_instance_id': pid,
         'title': get_val('title'),
@@ -120,7 +126,8 @@ def transform_process_instance(instance_data, forced_id=None):
         'form_component_values': form_values,
         'originator_name': originator_name,
         'current_approvers': current_approvers_str,
-        'tasks': tasks # Now we process and save this to DB
+        'tasks': tasks, # Now we process and save this to DB
+        'form_values_cleaned': form_values_cleaned
     }
 
 def sync_single_instance(process_instance_id):

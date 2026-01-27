@@ -78,6 +78,14 @@ Listen for real-time events.
 python main.py stream
 ```
 
+#### C. Data ETL (Cleaning)
+The tool has built-in ETL logic to clean the complex `form_component_values` (JSON) into a readable `form_values_cleaned` (JSON).
+- **Auto-Cleaning**: Data is automatically cleaned and saved during `stream` or `history` sync.
+- **Manual Full Cleaning**: To re-clean existing data:
+  ```bash
+  python etl.py
+  ```
+
 ## Database Schema
 
 ### `process_instance`
@@ -92,6 +100,7 @@ Main approval records.
 | `originator_name` | **Originator Name** | Derived (User Cache) |
 | `current_approvers` | **Current Approvers** | Derived (Tasks + User Cache) |
 | `form_component_values` | Form Data (JSON) | API Raw |
+| `form_values_cleaned` | **Cleaned Form Data** (Simple JSON) | Automated ETL |
 
 ### `dingtalk_user`
 Local user cache.

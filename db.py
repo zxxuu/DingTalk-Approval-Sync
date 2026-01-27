@@ -112,20 +112,20 @@ def upsert_process_instance(data):
     if isinstance(data.get('form_component_values'), (dict, list)):
         data['form_component_values'] = json.dumps(data['form_component_values'], ensure_ascii=False)
         
-    if isinstance(data.get('tasks'), (dict, list)):
-        data['tasks'] = json.dumps(data.get('tasks'), ensure_ascii=False)
+    if isinstance(data.get('form_values_cleaned'), (dict, list)):
+        data['form_values_cleaned'] = json.dumps(data.get('form_values_cleaned'), ensure_ascii=False)
 
     upsert_sql = """
     INSERT INTO `process_instance` (
         `process_instance_id`, `title`, `create_time`, `finish_time`,
         `originator_userid`, `originator_dept_id`, `status`, `result`,
         `business_id`, `process_code`, `form_component_values`,
-        `originator_name`, `current_approvers`, `tasks`
+        `originator_name`, `current_approvers`, `tasks`, `form_values_cleaned`
     ) VALUES (
         %(process_instance_id)s, %(title)s, %(create_time)s, %(finish_time)s,
         %(originator_userid)s, %(originator_dept_id)s, %(status)s, %(result)s,
         %(business_id)s, %(process_code)s, %(form_component_values)s,
-        %(originator_name)s, %(current_approvers)s, %(tasks)s
+        %(originator_name)s, %(current_approvers)s, %(tasks)s, %(form_values_cleaned)s
     ) AS new
     ON DUPLICATE KEY UPDATE
         `title` = new.title,
@@ -136,6 +136,7 @@ def upsert_process_instance(data):
         `originator_name` = new.originator_name,
         `current_approvers` = new.current_approvers,
         `tasks` = new.tasks,
+        `form_values_cleaned` = new.form_values_cleaned,
         `update_time` = NOW();
     """
 

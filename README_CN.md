@@ -80,6 +80,14 @@ python main.py history 2024-01-01 2024-01-31
 python main.py stream
 ```
 
+#### 方式 C：数据清洗 (ETL)
+本工具内置了数据清洗功能，可以将复杂的表单组件数据 (`form_component_values`) 转换为易读的 JSON 格式 (`form_values_cleaned`)。
+- **自动清洗**：使用上述 `stream` 或 `history` 模式同步时，程序会自动清洗数据并保存。
+- **手动全量清洗**：如果需要重新清洗已有数据，可运行：
+  ```bash
+  python etl.py
+  ```
+
 ## 数据库结构
 
 ### 1. `process_instance` (审批主表)
@@ -94,6 +102,7 @@ python main.py stream
 | `originator_name` | **发起人姓名** | 本地 `dingtalk_user` 关联查找 |
 | `current_approvers` | **当前审批人** (逗号分隔) | API `tasks` 解析 + 本地关联查找 |
 | `form_component_values` | 完整表单数据 (JSON) | API 原始数据 |
+| `form_values_cleaned` | **已清洗表单数据** (简易JSON) | ETL 自动生成 |
 | `create_time` | 创建时间 | API 原始数据 |
 
 ### 2. `dingtalk_user` (用户缓存表)
