@@ -189,13 +189,19 @@ def sync_users():
 
 class BPMSHandler:
     def pre_start(self):
-        pass
+        logger.info("BPMSHandler: pre_start check passed.")
         
     async def process(self, event):
         """
         Handle the event.
         """
-        return on_bpms_instance_change(event)
+        # Debug: Log that we actually got *something*
+        # event attributes might vary by sdk version, usually .topic, .event_id, .data
+        logger.info(f"[Stream] Received raw event. Topic: {getattr(event, 'topic', 'unknown')} | Type: {type(event)}")
+        
+        # Run synchronous processing in a separate thread to keep the websocket alive
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, on_bpms_instance_change, event)
 
 def on_bpms_instance_change(event):
     """
@@ -203,8 +209,14 @@ def on_bpms_instance_change(event):
     """
     try:
         # data is usually in event.data (depending on SDK version, sometimes event.message)
-        data = json.loads(event.data)
-        logger.info(f"Received Event: {event.topic} -> {data}")
+        # Handle cases where event.data might already be dict or string
+        raw_data = getattr(event, 'data', "{}")
+        if isinstance(raw_data, str):
+            data = json.loads(raw_data)
+        else:
+            data = raw_data
+            
+        logger.info(f"Parsed Event Data: {data}")
         
         process_instance_id = data.get('processInstanceId')
         
