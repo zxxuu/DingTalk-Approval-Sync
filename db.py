@@ -50,6 +50,8 @@ def create_table_if_not_exists():
                 `originator_name` VARCHAR(64) COMMENT 'Originator Name',
                 `current_approvers` VARCHAR(512) COMMENT 'Current Approvers Names',
                 `update_time` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Last Sync Time',
+                `tasks` JSON COMMENT 'Raw Tasks List',
+                `form_values_cleaned` JSON COMMENT 'Cleaned Form Data',
                 PRIMARY KEY (`process_instance_id`),
                 KEY `idx_create_time` (`create_time`),
                 KEY `idx_process_code` (`process_code`)
@@ -72,6 +74,11 @@ def create_table_if_not_exists():
             if not cursor.fetchone():
                 logger.info("Adding column `tasks` to process_instance...")
                 cursor.execute("ALTER TABLE `process_instance` ADD COLUMN `tasks` JSON COMMENT 'Raw Tasks List' AFTER `current_approvers`")
+
+            cursor.execute("SHOW COLUMNS FROM `process_instance` LIKE 'form_values_cleaned'")
+            if not cursor.fetchone():
+                logger.info("Adding column `form_values_cleaned` to process_instance...")
+                cursor.execute("ALTER TABLE `process_instance` ADD COLUMN `form_values_cleaned` JSON COMMENT 'Cleaned Form Data' AFTER `tasks`")
 
             # 2. Create dingtalk_user table
             create_user_sql = """
