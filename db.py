@@ -111,6 +111,9 @@ def upsert_process_instance(data):
     # Ensure JSON fields are serialized if passed as dict/list
     if isinstance(data.get('form_component_values'), (dict, list)):
         data['form_component_values'] = json.dumps(data['form_component_values'], ensure_ascii=False)
+    
+    if isinstance(data.get('tasks'), (dict, list)):
+        data['tasks'] = json.dumps(data['tasks'], ensure_ascii=False)
         
     if isinstance(data.get('form_values_cleaned'), (dict, list)):
         data['form_values_cleaned'] = json.dumps(data.get('form_values_cleaned'), ensure_ascii=False)

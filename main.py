@@ -1,4 +1,5 @@
 import sys
+import asyncio
 import logging
 import os
 import json
@@ -18,7 +19,7 @@ from db import (
 from dingtalk_client import DingTalkClient
 
 # DingTalk Stream SDK
-from dingtalk_stream import DingTalkStreamClient, Credential
+from dingtalk_stream import DingTalkStreamClient, Credential, EventHandler, AckMessage
 
 # ETL
 from etl import parse_component_list
@@ -194,47 +195,52 @@ def sync_users():
 
 # --- Stream Mode Handlers ---
 
-class BPMSHandler:
-    def pre_start(self):
-        logger.info("BPMSHandler: pre_start check passed.")
-        
+class AllEventHandler(EventHandler):
+    """
+    Catch-all event handler to log all incoming events for debugging and processing.
+    This is the correct way to handle event subscriptions in DingTalk Stream mode.
+    """
     async def process(self, event):
         """
-        Handle the event.
+        Log all events that come through the stream and process BPMS events.
+        Event types are determined from event.headers (dict-like) containing 'eventType'.
         """
-        # Debug: Log that we actually got *something*
-        # event attributes might vary by sdk version, usually .topic, .event_id, .data
-        logger.info(f"[Stream] Received raw event. Topic: {getattr(event, 'topic', 'unknown')} | Type: {type(event)}")
+        # Extract event properties - different SDK versions may have different structures
+        headers = getattr(event, 'headers', {})
+        data = getattr(event, 'data', '{}')
         
-        # Run synchronous processing in a separate thread to keep the websocket alive
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, on_bpms_instance_change, event)
-
-def on_bpms_instance_change(event):
-    """
-    Callback logic for bpms_instance_change event.
-    """
-    try:
-        # data is usually in event.data (depending on SDK version, sometimes event.message)
-        # Handle cases where event.data might already be dict or string
-        raw_data = getattr(event, 'data', "{}")
-        if isinstance(raw_data, str):
-            data = json.loads(raw_data)
+        # headers might be a dict or an object with attributes
+        if isinstance(headers, dict):
+            event_type = headers.get('eventType') or headers.get('event_type', 'unknown')
+            topic = headers.get('topic', 'unknown')
         else:
-            data = raw_data
-            
-        logger.info(f"Parsed Event Data: {data}")
+            event_type = getattr(headers, 'eventType', None) or getattr(headers, 'event_type', 'unknown')
+            topic = getattr(headers, 'topic', 'unknown')
         
-        process_instance_id = data.get('processInstanceId')
+        logger.info(f"[AllEventHandler] *** EVENT RECEIVED ***")
+        logger.info(f"  EventType: {event_type}")
+        logger.info(f"  Topic: {topic}")
+        logger.info(f"  Headers: {headers}")
+        logger.info(f"  Data (first 500 chars): {str(data)[:500]}")
         
-        if process_instance_id:
-            logger.info(f"Processing Stream Event for Instance: {process_instance_id}")
-            sync_single_instance(process_instance_id)
-            
-        return {"status": "success"}
-    except Exception as e:
-        logger.error(f"Error handling event: {e}")
-        return {"status": "error", "message": str(e)}
+        # Process BPMS events (approval workflow events)
+        if event_type in ['bpms_instance_change', 'bpms_task_change'] or 'bpms' in str(event_type).lower():
+            try:
+                if isinstance(data, str):
+                    parsed_data = json.loads(data)
+                else:
+                    parsed_data = data
+                process_instance_id = parsed_data.get('processInstanceId')
+                if process_instance_id:
+                    logger.info(f"  -> Processing BPMS event, syncing instance: {process_instance_id}")
+                    # Run sync in executor to not block the async loop
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, sync_single_instance, process_instance_id)
+            except Exception as e:
+                logger.error(f"  -> Error processing BPMS event: {e}")
+        
+        return AckMessage.STATUS_OK, 'OK'
+
 
 def start_stream_mode():
     logger.info("Starting DingTalk Stream Mode...")
@@ -249,8 +255,11 @@ def start_stream_mode():
     credential = Credential(client_id, client_secret)
     client = DingTalkStreamClient(credential)
     
-    # Register callback for approval instance changes
-    client.register_callback_handler("bpms_instance_change", BPMSHandler())
+    # For event subscriptions (审批事件), use register_all_event_handler
+    # The event type is determined from headers.event_type in the handler
+    # NOTE: register_callback_handler is for chatbot callbacks, NOT for events
+    client.register_all_event_handler(AllEventHandler())
+
     
     logger.info("Stream Client Initialized. Listening for events...")
     client.start_forever()

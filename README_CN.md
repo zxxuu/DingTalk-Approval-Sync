@@ -65,7 +65,7 @@ python main.py list-codes
 python main.py history
 
 # 指定日期范围
-python main.py history 2024-01-01 2024-01-31
+python main.py history 2026-01-29 2026-01-29
 ```
 **数据逻辑说明**：
 - 程序从钉钉 API 获取原始 JSON。
