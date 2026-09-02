@@ -14,9 +14,14 @@ from db import (
     upsert_process_instance, 
     upsert_dingtalk_users, 
     get_user_name_from_db,
-    get_instance_status
+    get_instance_status,
+    upsert_operation_records,
+    update_instance_fingerprint,
+    get_instance_ids_for_refresh,
 )
 from dingtalk_client import DingTalkClient
+from asset_service import enqueue_instance_assets, sync_assets, status_report
+from minio_client import ensure_bucket
 
 # DingTalk Stream SDK
 from dingtalk_stream import DingTalkStreamClient, Credential, EventHandler, AckMessage
@@ -131,16 +136,46 @@ def transform_process_instance(instance_data, forced_id=None):
         'form_values_cleaned': form_values_cleaned
     }
 
-def sync_single_instance(process_instance_id):
-    """Fetch and sync a single instance."""
+def build_operation_records(instance_data):
+    """
+    从详情接口返回的 operation_records 构造操作记录/评论列表。
+
+    钉钉没有公开的"评论列表"接口，评论以 operation_type='ADD_REMARK' 的形式
+    混在 operation_records 里返回，因此这是获取评论的唯一途径。
+    同一实例内用数组下标 seq 作为唯一键（同一秒可能出现多条记录）。
+    """
+    records = []
+    for i, rec in enumerate(instance_data.get('operation_records') or []):
+        uid = rec.get('userid')
+        records.append({
+            'seq': i,
+            'operation_type': rec.get('operation_type'),
+            'operation_result': rec.get('operation_result'),
+            'userid': uid,
+            'user_name': get_user_name_cached(uid),
+            'remark': rec.get('remark') or None,
+            'operation_time': rec.get('date'),
+        })
+    return records
+
+
+def sync_single_instance(process_instance_id, force=False):
+    """
+    Fetch and sync a single instance, including operation records (comments)
+    and asset registration.
+
+    force=True 时忽略终态跳过。评论是在审批完成后才可能追加的，
+    所以增量刷新必须传 force=True，否则永远拿不到新评论。
+    """
     try:
         # Idempotency Check
         # If instance exists and is already in a final state, skip sync.
         # Final states: COMPLETED, TERMINATED
-        existing_status = get_instance_status(process_instance_id)
-        if existing_status in ['COMPLETED', 'TERMINATED']:
-            logger.info(f"Skipping {process_instance_id} (Already {existing_status})")
-            return
+        if not force:
+            existing_status = get_instance_status(process_instance_id)
+            if existing_status in ['COMPLETED', 'TERMINATED']:
+                logger.info(f"Skipping {process_instance_id} (Already {existing_status})")
+                return
 
         detail = dt_client.get_process_instance_detail(process_instance_id)
         if not detail:
@@ -158,6 +193,28 @@ def sync_single_instance(process_instance_id):
         logger.info(log_msg)
         
         upsert_process_instance(record)
+
+        # 操作记录与评论（ADD_REMARK）
+        records = build_operation_records(detail)
+        if records:
+            upsert_operation_records(process_instance_id, records)
+            update_instance_fingerprint(
+                process_instance_id,
+                op_record_count=len(records),
+                last_op_time=records[-1].get('operation_time'),
+            )
+            comments = sum(1 for r in records if r['operation_type'] == 'ADD_REMARK')
+            if comments:
+                logger.info(f"  -> {len(records)} 条操作记录（含 {comments} 条评论）")
+
+        # 登记图片/附件资产（只写库，不下载）
+        inserted = enqueue_instance_assets(
+            process_instance_id,
+            detail.get('form_component_values'),
+            operation_records=records
+        )
+        if inserted:
+            logger.info(f"  -> 新登记 {inserted} 个待转储资产")
     except Exception as e:
         logger.error(f"Failed to sync instance {process_instance_id}: {e}")
 
@@ -234,8 +291,10 @@ class AllEventHandler(EventHandler):
                 if process_instance_id:
                     logger.info(f"  -> Processing BPMS event, syncing instance: {process_instance_id}")
                     # Run sync in executor to not block the async loop
+                    # force=True：终态实例也可能被追加评论，必须重新拉取
                     loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(None, sync_single_instance, process_instance_id)
+                    await loop.run_in_executor(
+                        None, lambda: sync_single_instance(process_instance_id, force=True))
             except Exception as e:
                 logger.error(f"  -> Error processing BPMS event: {e}")
         
@@ -287,6 +346,27 @@ def start_history_mode(start_date, end_date, process_code):
 
     logger.info("History Sync Completed.")
 
+# --- Refresh Mode (评论增量刷新) ---
+
+def start_refresh_mode(since_days=None, limit=None):
+    """
+    重新拉取已有实例的详情，刷新操作记录与评论。
+
+    钉钉没有"评论列表"接口，也不保证评论变更会推送事件，因此评论只能靠轮询。
+    终态实例（COMPLETED/TERMINATED）同样会被处理，因为评论通常在审批结束后才追加。
+    """
+    logger.info(f"Starting Refresh Mode: since_days={since_days}, limit={limit}")
+    ids = get_instance_ids_for_refresh(limit=limit, since_days=since_days)
+    logger.info(f"Found {len(ids)} instances to refresh.")
+
+    total = len(ids)
+    for i, pid in enumerate(ids):
+        logger.info(f"Refreshing {i+1}/{total}...")
+        sync_single_instance(pid, force=True)
+        time.sleep(0.2)
+
+    logger.info("Refresh Completed.")
+
 def list_process_codes():
     """
     Helper to list process codes by fetching a user and listing their visible processes.
@@ -334,6 +414,9 @@ def main():
         print("  python main.py stream")
         print("  python main.py history <start_date> <end_date> [process_code]")
         print("  python main.py history (defaults to last month)")
+        print("  python main.py refresh [days] [limit]   <-- 增量刷新操作记录与评论")
+        print("  python main.py assets [limit] [image|attachment]  <-- 转储图片/附件到 MinIO")
+        print("  python main.py asset-status             <-- 查看转储进度")
         print("  python main.py list-codes  <-- Use to find your PROCESS_CODE")
         print("  python main.py sync-users  <-- Cache Users")
         return
@@ -348,6 +431,35 @@ def main():
 
     elif mode == 'sync-users':
         sync_users()
+
+    elif mode == 'refresh':
+        # python main.py refresh [days] [limit]
+        since_days = None
+        limit = None
+        for arg in sys.argv[2:4]:
+            if arg.isdigit():
+                if since_days is None:
+                    since_days = int(arg)
+                else:
+                    limit = int(arg)
+        start_refresh_mode(since_days=since_days, limit=limit)
+
+    elif mode == 'assets':
+        # python main.py assets [limit] [image|attachment]
+        limit = 200
+        atype = None
+        for arg in sys.argv[2:4]:
+            if arg.isdigit():
+                limit = int(arg)
+            elif arg in ('image', 'attachment'):
+                atype = arg
+        ensure_bucket()
+        stats = sync_assets(limit=limit, asset_type=atype)
+        print(stats)
+        status_report()
+
+    elif mode == 'asset-status':
+        status_report()
         
     elif mode == 'history':
         process_code_env = os.getenv('PROCESS_CODE', '')

@@ -2,3 +2,4 @@ requests
 pymysql
 python-dotenv
 dingtalk-stream
+minio

@@ -88,6 +88,53 @@ python main.py stream
   python etl.py
   ```
 
+#### 方式 D：增量刷新评论 (refresh)
+重新拉取已有审批单的详情，刷新操作记录与评论。
+```bash
+# 刷新最近 30 天的审批单
+python main.py refresh 30
+
+# 刷新最近 7 天，最多 200 条
+python main.py refresh 7 200
+```
+**为什么要单独一个模式**：评论是在审批**结束后**才可能追加的，而 `history` 模式会跳过
+`COMPLETED` / `TERMINATED` 的终态实例（为了性能）。`refresh` 会无视终态强制重新拉取。
+钉钉不保证评论变更会推送事件，所以建议每天定时跑一次。
+
+### 第四步：图片与附件转储到 MinIO
+
+> **为什么需要**：审批表单里的图片存的是 `static.dingtalk.com` 直链，域名、防盗链、
+> 留存策略都不在我们手里；附件更特殊——库里只存了 `fileId`，**根本没有直链**，
+> 必须调接口换取有效期仅 **15 分钟** 的下载地址。转储到自有 MinIO 后才能长期可控。
+
+1. 配置 `.env`（MinIO 部分）：
+   ```properties
+   MINIO_ENDPOINT=127.0.0.1:9000
+   MINIO_ACCESS_KEY=minioadmin
+   MINIO_SECRET_KEY=your_secret
+   MINIO_SECURE=false
+   MINIO_DEFAULT_BUCKET=web-files
+   ```
+
+2. 登记并转储：
+   ```bash
+   python asset_backfill.py register     # 扫本地库登记（零 API 调用）
+   python asset_backfill.py transfer 200 # 转储 200 个
+   python asset_backfill.py all 800      # 登记 + 转储一步到位
+   python asset_backfill.py verify 20    # 抽 20 个回读校验 sha256
+   python main.py asset-status           # 查看进度
+   ```
+
+日常增量由 `stream` / `history` / `refresh` 自动登记，新资产会进入待转储队列，
+再跑一次 `transfer` 即可。
+
+**设计要点**
+- 对象键按内容 `sha256` 生成（如 `dingtalk/image/2026/09/a3/a3f5...9f.jpg`），
+  同内容只存一份，重复执行天然幂等。
+- 原表字段一律不改，转储结果记在 `process_asset`，随时可回退到钉钉直链。
+- 附件必须"换链接后立即下载"，绝不能批量预取链接再排队下——15 分钟就过期了。
+- 桶保持**私有**，只能通过后端生成的签名 URL 访问（库里有工资表、发票等敏感数据）。
+
 ## 数据库结构
 
 ### 1. `process_instance` (审批主表)
@@ -112,3 +159,31 @@ python main.py stream
 | :--- | :--- |
 | `userid` | 钉钉 User ID |
 | `name` | 姓名 |
+
+### 3. `process_operation_record` (操作记录与评论)
+
+钉钉**没有公开的"评论列表"接口**，评论以 `operation_type = 'ADD_REMARK'` 的形式
+混在详情接口的 `operation_records` 里返回，这是获取评论的唯一途径。
+
+| 字段名 | 说明 |
+| :--- | :--- |
+| `process_instance_id` | 审批实例 ID |
+| `seq` | 实例内序号（唯一键，同一秒可能有多条记录） |
+| `operation_type` | `START_PROCESS_INSTANCE` 发起 / `EXECUTE_TASK_NORMAL` 审批 / **`ADD_REMARK` 评论** / `PROCESS_CC` 抄送 / `TERMINATE_PROCESS_INSTANCE` 终止 |
+| `operation_result` | `NONE` / `AGREE` / `REFUSE` |
+| `userid` / `user_name` | 操作人 ID 与姓名（姓名由本地表关联） |
+| `remark` | **审批意见 / 评论内容** |
+| `operation_time` | 操作时间 |
+
+### 4. `process_asset` (图片与附件资产表)
+
+| 字段名 | 说明 |
+| :--- | :--- |
+| `asset_type` | `image` 图片 / `attachment` 附件 |
+| `process_instance_id` | 所属审批实例 |
+| `asset_ref` | 去重键：图片=原 URL，附件=fileId |
+| `source_url` / `file_id` / `space_id` | 钉钉侧来源信息（图片无 file_id，附件无 source_url） |
+| `object_key` / `bucket` | MinIO 对象键与桶名 |
+| `sha256` / `size_bytes` / `declared_size` | 内容哈希 / 实际字节 / 钉钉声明字节（附件用于完整性校验） |
+| `status` | `PENDING` 待转储 / `SUCCESS` 成功 / `SKIPPED` 复用已有 / `FAILED` 失败 |
+| `retry_count` | 重试次数，达到 3 次后不再自动重试 |

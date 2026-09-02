@@ -201,6 +201,35 @@ class DingTalkClient:
                 
         return all_ids
 
+    def get_attachment_download_url(self, process_instance_id, file_id):
+        """
+        Exchange an approval attachment fileId for a temporary download URL.
+
+        IMPORTANT: the returned download_uri is valid for only 15 minutes, and it
+        must be consumed immediately. Never pre-fetch URLs in bulk and download
+        them later — they will already have expired by then.
+
+        Returns: (download_uri, space_id) or (None, None) on failure.
+        """
+        url = "https://oapi.dingtalk.com/topapi/processinstance/file/url/get"
+        token = self.get_access_token()
+        params = {"access_token": token}
+        payload = {"request": {"process_instance_id": process_instance_id, "file_id": str(file_id)}}
+
+        try:
+            response = requests.post(url, params=params, json=payload)
+            data = response.json()
+            if data.get("errcode") == 0:
+                result = data.get("result", {})
+                return result.get("download_uri"), result.get("space_id")
+            logger.error(
+                f"Failed to get download url for file {file_id} "
+                f"(instance {process_instance_id}): {data}")
+            return None, None
+        except Exception as e:
+            logger.error(f"Error getting attachment download url: {e}")
+            raise
+
     def get_process_instance_detail(self, process_instance_id):
         """
         Fetch details for a single process instance.
