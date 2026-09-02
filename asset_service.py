@@ -28,6 +28,7 @@ from db import (
     fetch_pending_assets,
     mark_asset_result,
     count_assets_by_status,
+    count_retryable_assets,
     update_instance_fingerprint,
 )
 from minio_client import (
@@ -464,6 +465,40 @@ def sync_assets(limit=200, asset_type=None, sleep=API_SLEEP):
     return stats
 
 
+def sync_assets_for_instance(process_instance_id, limit=200, sleep=API_SLEEP):
+    """
+    转储单个实例的待处理资产 —— 供 stream 模式做「新审批即时转储」。
+
+    与 sync_assets 的区别：只处理这一个实例，避免在事件回调里把全库积压任务
+    全部拉进来跑。只捞 PENDING/FAILED 且 retry_count 未超限的行。
+    """
+    ensure_bucket()
+    pending = fetch_pending_assets(
+        limit=limit, process_instance_id=process_instance_id)
+    if not pending:
+        return {'fetched': 0, 'success': 0, 'skipped': 0, 'failed': 0}
+
+    stats = {'fetched': len(pending), 'success': 0, 'skipped': 0, 'failed': 0}
+    for asset in pending:
+        label = asset.get('file_name') or (asset.get('source_url') or '')[-48:]
+        try:
+            result = transfer_asset(asset)
+            stats['success' if result == 'SUCCESS' else 'skipped'] += 1
+            logger.info(
+                f"[即时转储] {result} {asset['asset_type']} {label}")
+        except Exception as exc:
+            stats['failed'] += 1
+            logger.error(
+                f"[即时转储] FAILED {asset['asset_type']} {label}: {exc}")
+            mark_asset_result(asset['id'], 'FAILED', error_message=str(exc)[:500])
+        time.sleep(sleep)
+
+    logger.info(
+        f"实例 {process_instance_id} 转储完成：成功 {stats['success']}，"
+        f"复用 {stats['skipped']}，失败 {stats['failed']}")
+    return stats
+
+
 # ---------------------------------------------------------------- 网站取数
 
 # 图片与附件使用不同的签名有效期：图片在页面上停留时间长，附件基本是点了就下
@@ -529,6 +564,14 @@ def build_url_map(process_instance_id, expires=None):
         if item['url'] and item['fallback_url']:
             mapping[item['fallback_url']] = item['url']
     return mapping
+
+
+def count_pending_assets():
+    """
+    还需处理的资产条数（PENDING 或 FAILED 且未超出重试上限）。
+    口径与 fetch_pending_assets 完全一致（见 db.count_retryable_assets）。
+    """
+    return count_retryable_assets()
 
 
 def status_report():

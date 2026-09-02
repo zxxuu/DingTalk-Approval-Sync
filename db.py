@@ -120,7 +120,7 @@ def create_table_if_not_exists():
                 KEY `idx_status` (`status`),
                 KEY `idx_object` (`object_key`),
                 KEY `idx_sha256` (`sha256`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='DingTalk process image & attachment assets';
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='DingTalk process image & attachment assets';
             """
             cursor.execute(create_asset_sql)
 
@@ -142,7 +142,7 @@ def create_table_if_not_exists():
                 UNIQUE KEY `uk_record` (`process_instance_id`, `seq`),
                 KEY `idx_type` (`operation_type`),
                 KEY `idx_time` (`operation_time`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='DingTalk process operation records and comments';
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='DingTalk process operation records and comments';
             """
             cursor.execute(create_op_sql)
 
@@ -323,18 +323,24 @@ def insert_assets_pending(assets):
     finally:
         conn.close()
 
-def fetch_pending_assets(asset_type=None, limit=100):
+def fetch_pending_assets(asset_type=None, limit=100, process_instance_id=None, max_retry=3):
     """
-    Fetch assets waiting to be transferred, oldest first, retry_count capped at 3.
+    Fetch assets waiting to be transferred, oldest first.
+
+    注意：这里必须把 FAILED 一起捞出来，否则失败项一旦被标记就永远不会被重试。
+    retry_count 达到 max_retry 的项不再捞取，避免无限重试（例如离职员工已取不回的附件）。
     """
     sql = """
     SELECT * FROM `process_asset`
-    WHERE `status` = 'PENDING' AND `retry_count` < 3
+    WHERE `status` IN ('PENDING', 'FAILED') AND `retry_count` < %s
     """
-    params = []
+    params = [max_retry]
     if asset_type:
         sql += " AND `asset_type` = %s"
         params.append(asset_type)
+    if process_instance_id:
+        sql += " AND `process_instance_id` = %s"
+        params.append(process_instance_id)
     sql += " ORDER BY `id` ASC LIMIT %s"
     params.append(limit)
 
@@ -348,6 +354,29 @@ def fetch_pending_assets(asset_type=None, limit=100):
         raise
     finally:
         conn.close()
+
+def count_retryable_assets(max_retry=3):
+    """
+    Count assets that fetch_pending_assets() would actually pick up.
+
+    Keep the WHERE clause in sync with fetch_pending_assets(), otherwise the
+    report says "N left" while the worker fetches nothing.
+    """
+    sql = """
+    SELECT COUNT(*) AS n FROM `process_asset`
+    WHERE `status` IN ('PENDING', 'FAILED') AND `retry_count` < %s
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(sql, (max_retry,))
+            return cursor.fetchone()['n']
+    except Exception as e:
+        logger.error(f"Error counting retryable assets: {e}")
+        raise
+    finally:
+        conn.close()
+
 
 def mark_asset_result(asset_id, status, bucket=None, object_key=None, sha256=None,
                       size_bytes=None, content_type=None, error_message=None):

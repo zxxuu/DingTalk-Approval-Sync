@@ -99,12 +99,58 @@ def put_bytes(object_key, data, content_type='application/octet-stream'):
     return length
 
 
+_public_client_cache = None
+
+
+def _public_client():
+    """
+    Client used only for signing.
+
+    Cached because constructing a Minio client costs a bucket-location round
+    trip; without caching every signed URL would pay for one.
+
+    MINIO_ENDPOINT is often 127.0.0.1 (this script runs on the MinIO host), but a
+    URL containing 127.0.0.1 is unusable by any other machine — the browser would
+    resolve it to itself. Set MINIO_PUBLIC_ENDPOINT (LAN IP / domain reachable by
+    the browser) so signed URLs point somewhere useful while uploads still go
+    through the local endpoint. Left unset, behaviour is unchanged.
+    """
+    global _public_client_cache
+
+    public_endpoint = (os.getenv('MINIO_PUBLIC_ENDPOINT') or '').strip()
+    if not public_endpoint or public_endpoint == (os.getenv('MINIO_ENDPOINT') or '').strip():
+        return get_minio_client()
+    if _public_client_cache is not None:
+        return _public_client_cache
+
+    # MinIO SDK wants host:port, not a URL. Accept http(s):// too and strip it.
+    secure = (os.getenv('MINIO_SECURE', 'false') or 'false').strip().lower() \
+        in ('1', 'true', 'yes')
+    low = public_endpoint.lower()
+    if low.startswith('https://'):
+        public_endpoint, secure = public_endpoint[8:], True
+    elif low.startswith('http://'):
+        public_endpoint, secure = public_endpoint[7:], False
+    public_endpoint = public_endpoint.rstrip('/')
+
+    _public_client_cache = Minio(
+        public_endpoint,
+        access_key=(os.getenv('MINIO_ACCESS_KEY') or '').strip(),
+        secret_key=(os.getenv('MINIO_SECRET_KEY') or '').strip(),
+        secure=secure,
+    )
+    return _public_client_cache
+
+
 def presigned_get_url(object_key, expires_seconds=None, filename=None):
     """
     Generate a temporary, signed download URL.
     Images default to 1 hour, files to 5 minutes.
+
+    Signature is computed by _public_client() so the host in the URL is
+    MINIO_PUBLIC_ENDPOINT when configured; otherwise identical to before.
     """
-    client = get_minio_client()
+    client = _public_client()
     bucket = get_bucket()
     if expires_seconds is None:
         expires_seconds = int(os.getenv('MINIO_PRESIGN_EXPIRES', 3600))

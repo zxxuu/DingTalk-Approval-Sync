@@ -4,6 +4,7 @@ import logging
 import os
 import json
 import time
+import threading
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from dotenv import load_dotenv
@@ -20,7 +21,13 @@ from db import (
     get_instance_ids_for_refresh,
 )
 from dingtalk_client import DingTalkClient
-from asset_service import enqueue_instance_assets, sync_assets, status_report
+from asset_service import (
+    enqueue_instance_assets,
+    sync_assets,
+    sync_assets_for_instance,
+    status_report,
+    count_pending_assets,
+)
 from minio_client import ensure_bucket
 
 # DingTalk Stream SDK
@@ -159,13 +166,48 @@ def build_operation_records(instance_data):
     return records
 
 
-def sync_single_instance(process_instance_id, force=False):
+# ---------------------------------------------------------------- 即时转储
+# stream 事件回调必须尽快 ACK，转储（下载图片 + 调接口换附件链接）可能耗时数十秒，
+# 放在回调里同步执行会让钉钉迟迟收不到 ACK 从而重推事件。因此登记完成后交给后台线程。
+_transfer_lock = threading.Lock()
+_transfer_inflight = set()
+
+
+def _transfer_instance_async(process_instance_id):
+    """在后台线程转储单个实例的资产；同一实例不会重复拉起线程。"""
+    with _transfer_lock:
+        if process_instance_id in _transfer_inflight:
+            return False
+        _transfer_inflight.add(process_instance_id)
+
+    def _worker():
+        try:
+            sync_assets_for_instance(process_instance_id)
+        except Exception as exc:
+            logger.error(f"后台转储失败 {process_instance_id}: {exc}")
+        finally:
+            with _transfer_lock:
+                _transfer_inflight.discard(process_instance_id)
+
+    threading.Thread(
+        target=_worker,
+        name=f"asset-{str(process_instance_id)[:16]}",
+        daemon=True,
+    ).start()
+    return True
+
+
+def sync_single_instance(process_instance_id, force=False, auto_transfer=False):
     """
     Fetch and sync a single instance, including operation records (comments)
     and asset registration.
 
     force=True 时忽略终态跳过。评论是在审批完成后才可能追加的，
     所以增量刷新必须传 force=True，否则永远拿不到新评论。
+
+    auto_transfer=True 时，登记完新资产立刻在后台线程转储到 MinIO（stream 模式用）。
+    为 False 时只登记不下载，积压的资产由 `python main.py assets` 或
+    `python asset_backfill.py transfer` 批量处理。
     """
     try:
         # Idempotency Check
@@ -215,8 +257,24 @@ def sync_single_instance(process_instance_id, force=False):
         )
         if inserted:
             logger.info(f"  -> 新登记 {inserted} 个待转储资产")
+            if auto_transfer:
+                if _transfer_instance_async(process_instance_id):
+                    logger.info(f"  -> 已在后台线程启动即时转储")
     except Exception as e:
         logger.error(f"Failed to sync instance {process_instance_id}: {e}")
+
+
+def _report_pending_assets():
+    """history / refresh 结束后提示还有多少资产没转储。"""
+    try:
+        pending = count_pending_assets()
+    except Exception as exc:
+        logger.warning(f"统计待转储资产失败: {exc}")
+        return
+    if pending:
+        logger.info(
+            f"还有 {pending} 个资产待转储，"
+            f"执行 `python main.py assets` 或 `python asset_backfill.py transfer` 处理")
 
 # --- User Sync ---
 
@@ -294,7 +352,8 @@ class AllEventHandler(EventHandler):
                     # force=True：终态实例也可能被追加评论，必须重新拉取
                     loop = asyncio.get_event_loop()
                     await loop.run_in_executor(
-                        None, lambda: sync_single_instance(process_instance_id, force=True))
+                        None, lambda: sync_single_instance(
+                            process_instance_id, force=True, auto_transfer=True))
             except Exception as e:
                 logger.error(f"  -> Error processing BPMS event: {e}")
         
@@ -365,6 +424,7 @@ def start_refresh_mode(since_days=None, limit=None):
         sync_single_instance(pid, force=True)
         time.sleep(0.2)
 
+    _report_pending_assets()
     logger.info("Refresh Completed.")
 
 def list_process_codes():
