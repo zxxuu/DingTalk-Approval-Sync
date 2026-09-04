@@ -84,13 +84,69 @@ def create_table_if_not_exists():
             create_user_sql = """
             CREATE TABLE IF NOT EXISTS `dingtalk_user` (
                 `userid` VARCHAR(64) NOT NULL COMMENT 'User ID',
-                `name` VARCHAR(64) COMMENT 'User Name',
-                `dept_ids` JSON COMMENT 'Department IDs',
+                `unionid` VARCHAR(64) DEFAULT NULL COMMENT 'DingTalk UnionID',
+                `name` VARCHAR(64) DEFAULT NULL COMMENT 'User Name',
+                `nickname` VARCHAR(64) DEFAULT NULL COMMENT 'Nickname / Preferred Username',
+                `title` VARCHAR(128) DEFAULT NULL COMMENT 'Job Title / Position',
+                `mobile` VARCHAR(32) DEFAULT NULL COMMENT 'Mobile Phone Number',
+                `email` VARCHAR(128) DEFAULT NULL COMMENT 'Email Address',
+                `avatar` VARCHAR(512) DEFAULT NULL COMMENT 'Avatar URL',
+                `job_number` VARCHAR(64) DEFAULT NULL COMMENT 'Job Number / Employee ID',
+                `work_place` VARCHAR(128) DEFAULT NULL COMMENT 'Workplace',
+                `remark` VARCHAR(255) DEFAULT NULL COMMENT 'Remark',
+                `dept_ids` JSON DEFAULT NULL COMMENT 'Department IDs',
+                `dept_order_list` JSON DEFAULT NULL COMMENT 'Dept Order List',
+                `leader_in_dept` JSON DEFAULT NULL COMMENT 'Leader Status in Depts',
+                `role_list` JSON DEFAULT NULL COMMENT 'Roles / Groups List',
+                `is_admin` TINYINT(1) DEFAULT 0 COMMENT 'Is Enterprise Admin',
+                `is_boss` TINYINT(1) DEFAULT 0 COMMENT 'Is Boss',
+                `is_leader` TINYINT(1) DEFAULT 0 COMMENT 'Is Dept Leader',
+                `active` TINYINT(1) DEFAULT 1 COMMENT 'Is Active',
+                `raw_json` JSON DEFAULT NULL COMMENT 'Full Raw DingTalk User JSON',
                 `update_time` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Last Update Time',
-                PRIMARY KEY (`userid`)
+                `create_time` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT 'First Sync Time',
+                PRIMARY KEY (`userid`),
+                KEY `idx_unionid` (`unionid`),
+                KEY `idx_mobile` (`mobile`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='DingTalk Users Cache';
             """
             cursor.execute(create_user_sql)
+
+            # Check for new columns in dingtalk_user (for migration)
+            user_cols_to_add = [
+                ("unionid", "VARCHAR(64) DEFAULT NULL COMMENT 'DingTalk UnionID' AFTER `userid`"),
+                ("nickname", "VARCHAR(64) DEFAULT NULL COMMENT 'Nickname' AFTER `name`"),
+                ("title", "VARCHAR(128) DEFAULT NULL COMMENT 'Job Title' AFTER `nickname`"),
+                ("mobile", "VARCHAR(32) DEFAULT NULL COMMENT 'Mobile Phone' AFTER `title`"),
+                ("email", "VARCHAR(128) DEFAULT NULL COMMENT 'Email' AFTER `mobile`"),
+                ("avatar", "VARCHAR(512) DEFAULT NULL COMMENT 'Avatar URL' AFTER `email`"),
+                ("job_number", "VARCHAR(64) DEFAULT NULL COMMENT 'Job Number' AFTER `avatar`"),
+                ("work_place", "VARCHAR(128) DEFAULT NULL COMMENT 'Workplace' AFTER `job_number`"),
+                ("remark", "VARCHAR(255) DEFAULT NULL COMMENT 'Remark' AFTER `work_place`"),
+                ("dept_order_list", "JSON DEFAULT NULL COMMENT 'Dept Order List' AFTER `dept_ids`"),
+                ("leader_in_dept", "JSON DEFAULT NULL COMMENT 'Leader in Dept' AFTER `dept_order_list`"),
+                ("role_list", "JSON DEFAULT NULL COMMENT 'Roles / Groups' AFTER `leader_in_dept`"),
+                ("is_admin", "TINYINT(1) DEFAULT 0 COMMENT 'Is Admin' AFTER `role_list`"),
+                ("is_boss", "TINYINT(1) DEFAULT 0 COMMENT 'Is Boss' AFTER `is_admin`"),
+                ("is_leader", "TINYINT(1) DEFAULT 0 COMMENT 'Is Leader' AFTER `is_boss`"),
+                ("active", "TINYINT(1) DEFAULT 1 COMMENT 'Is Active' AFTER `is_leader`"),
+                ("raw_json", "JSON DEFAULT NULL COMMENT 'Full Raw DingTalk JSON' AFTER `active`"),
+            ]
+            for col_name, col_def in user_cols_to_add:
+                cursor.execute(f"SHOW COLUMNS FROM `dingtalk_user` LIKE '{col_name}'")
+                if not cursor.fetchone():
+                    logger.info(f"Adding column `{col_name}` to dingtalk_user...")
+                    cursor.execute(f"ALTER TABLE `dingtalk_user` ADD COLUMN `{col_name}` {col_def}")
+
+            cursor.execute("SHOW INDEX FROM `dingtalk_user` WHERE Key_name = 'idx_unionid'")
+            if not cursor.fetchone():
+                logger.info("Adding index `idx_unionid` to dingtalk_user...")
+                cursor.execute("ALTER TABLE `dingtalk_user` ADD KEY `idx_unionid` (`unionid`)")
+
+            cursor.execute("SHOW INDEX FROM `dingtalk_user` WHERE Key_name = 'idx_mobile'")
+            if not cursor.fetchone():
+                logger.info("Adding index `idx_mobile` to dingtalk_user...")
+                cursor.execute("ALTER TABLE `dingtalk_user` ADD KEY `idx_mobile` (`mobile`)")
 
             # 3. Create process_asset table (图片/附件转储资产表)
             create_asset_sql = """
@@ -222,27 +278,92 @@ def upsert_process_instance(data):
 
 def upsert_dingtalk_users(users):
     """
-    Batch upsert dingtalk users.
-    users: List of dicts {'userid': '...', 'name': '...'}
+    Batch upsert dingtalk users with rich metadata.
+    users: List of user dicts
     """
     if not users:
         return
 
+    processed_users = []
+    for u in users:
+        dept_ids = u.get('dept_id_list') or u.get('dept_ids')
+        dept_ids_json = json.dumps(dept_ids, ensure_ascii=False) if dept_ids is not None else None
+        
+        dept_order_list = u.get('dept_order_list')
+        dept_order_json = json.dumps(dept_order_list, ensure_ascii=False) if dept_order_list is not None else None
+        
+        leader_in_dept = u.get('leader_in_dept')
+        leader_in_dept_json = json.dumps(leader_in_dept, ensure_ascii=False) if leader_in_dept is not None else None
+        
+        role_list = u.get('role_list')
+        role_list_json = json.dumps(role_list, ensure_ascii=False) if role_list is not None else None
+        
+        raw_json_str = json.dumps(u, ensure_ascii=False)
+
+        processed_users.append({
+            'userid': u.get('userid'),
+            'unionid': u.get('unionid'),
+            'name': u.get('name'),
+            'nickname': u.get('nickname') or u.get('name'),
+            'title': u.get('title') or '',
+            'mobile': u.get('mobile') or '',
+            'email': u.get('email') or '',
+            'avatar': u.get('avatar') or '',
+            'job_number': u.get('job_number') or '',
+            'work_place': u.get('work_place') or '',
+            'remark': u.get('remark') or '',
+            'dept_ids': dept_ids_json,
+            'dept_order_list': dept_order_json,
+            'leader_in_dept': leader_in_dept_json,
+            'role_list': role_list_json,
+            'is_admin': 1 if (u.get('admin') or u.get('is_admin')) else 0,
+            'is_boss': 1 if (u.get('boss') or u.get('is_boss')) else 0,
+            'is_leader': 1 if (u.get('leader') or u.get('is_leader')) else 0,
+            'active': 1 if u.get('active', True) else 0,
+            'raw_json': raw_json_str,
+        })
+
     upsert_sql = """
-    INSERT INTO `dingtalk_user` (`userid`, `name`)
-    VALUES (%(userid)s, %(name)s)
-    AS new
+    INSERT INTO `dingtalk_user` (
+        `userid`, `unionid`, `name`, `nickname`, `title`, `mobile`, `email`,
+        `avatar`, `job_number`, `work_place`, `remark`, `dept_ids`,
+        `dept_order_list`, `leader_in_dept`, `role_list`, `is_admin`,
+        `is_boss`, `is_leader`, `active`, `raw_json`
+    ) VALUES (
+        %(userid)s, %(unionid)s, %(name)s, %(nickname)s, %(title)s, %(mobile)s, %(email)s,
+        %(avatar)s, %(job_number)s, %(work_place)s, %(remark)s, %(dept_ids)s,
+        %(dept_order_list)s, %(leader_in_dept)s, %(role_list)s, %(is_admin)s,
+        %(is_boss)s, %(is_leader)s, %(active)s, %(raw_json)s
+    ) AS new
     ON DUPLICATE KEY UPDATE
+        `unionid` = new.unionid,
         `name` = new.name,
+        `nickname` = new.nickname,
+        `title` = new.title,
+        `mobile` = new.mobile,
+        `email` = new.email,
+        `avatar` = new.avatar,
+        `job_number` = new.job_number,
+        `work_place` = new.work_place,
+        `remark` = new.remark,
+        `dept_ids` = new.dept_ids,
+        `dept_order_list` = new.dept_order_list,
+        `leader_in_dept` = new.leader_in_dept,
+        `role_list` = new.role_list,
+        `is_admin` = new.is_admin,
+        `is_boss` = new.is_boss,
+        `is_leader` = new.is_leader,
+        `active` = new.active,
+        `raw_json` = new.raw_json,
         `update_time` = NOW();
     """
     
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.executemany(upsert_sql, users)
+            cursor.executemany(upsert_sql, processed_users)
         conn.commit()
-        logger.info(f"Successfully upserted {len(users)} users.")
+        logger.info(f"Successfully upserted {len(processed_users)} users.")
     except Exception as e:
         logger.error(f"Error upserting users: {e}")
         raise
@@ -265,6 +386,40 @@ def get_user_name_from_db(userid):
                 return result['name']
     except Exception as e:
         logger.error(f"Error fetching user name: {e}")
+    finally:
+        conn.close()
+    return None
+
+def get_user_info_from_db(userid):
+    """
+    Get full user record from cache table by userid.
+    """
+    if not userid:
+        return None
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM `dingtalk_user` WHERE userid = %s", (userid,))
+            return cursor.fetchone()
+    except Exception as e:
+        logger.error(f"Error fetching user info for {userid}: {e}")
+    finally:
+        conn.close()
+    return None
+
+def get_user_by_unionid_from_db(unionid):
+    """
+    Get full user record from cache table by unionid.
+    """
+    if not unionid:
+        return None
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT * FROM `dingtalk_user` WHERE unionid = %s", (unionid,))
+            return cursor.fetchone()
+    except Exception as e:
+        logger.error(f"Error fetching user by unionid {unionid}: {e}")
     finally:
         conn.close()
     return None

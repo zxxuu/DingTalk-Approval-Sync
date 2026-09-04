@@ -15,6 +15,8 @@ from db import (
     upsert_process_instance, 
     upsert_dingtalk_users, 
     get_user_name_from_db,
+    get_user_info_from_db,
+    get_user_by_unionid_from_db,
     get_instance_status,
     upsert_operation_records,
     update_instance_fingerprint,
@@ -280,14 +282,16 @@ def _report_pending_assets():
 
 def sync_users():
     """
-    Fetch all users from DingTalk and save to DB.
+    Fetch all users from DingTalk, enrich with full details, and save to DB.
     """
     logger.info("Starting User Sync...")
     try:
         # 1. Get all departments
         logger.info("Fetching departments...")
         dept_ids = dt_client.get_department_list_ids()
-        logger.info(f"Found {len(dept_ids)} departments.")
+        if 1 not in dept_ids:
+            dept_ids.append(1)
+        logger.info(f"Found {len(dept_ids)} departments (including root).")
 
         # 2. Get users for each department
         all_users = []
@@ -297,12 +301,23 @@ def sync_users():
             if i % 10 == 0:
                 logger.info(f"Processed {i+1}/{len(dept_ids)} departments...")
         
-        # Deduplicate
-        unique_users = {u['userid']: u for u in all_users}.values()
-        user_list = list(unique_users)
-        
-        logger.info(f"Found {len(user_list)} unique users. Upserting to DB...")
-        upsert_dingtalk_users(user_list)
+        # Deduplicate by userid
+        unique_users = {u['userid']: u for u in all_users}
+        logger.info(f"Found {len(unique_users)} unique users from department lists.")
+
+        # 3. Enrich users with /topapi/v2/user/get details (roles, groups, etc.)
+        enriched_users = []
+        for uid, u in unique_users.items():
+            try:
+                detail = dt_client.get_user_detail(uid)
+                if detail:
+                    u.update(detail)
+            except Exception as ex:
+                logger.warning(f"Could not fetch extra details for user {uid}: {ex}")
+            enriched_users.append(u)
+
+        logger.info(f"Upserting {len(enriched_users)} users with full details to DB...")
+        upsert_dingtalk_users(enriched_users)
         logger.info("User Sync Completed.")
         
     except Exception as e:

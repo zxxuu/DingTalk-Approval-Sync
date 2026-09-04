@@ -108,7 +108,7 @@ class DingTalkClient:
                     result = data.get("result", {})
                     users = result.get("list", [])
                     for u in users:
-                        all_users.append({'userid': u['userid'], 'name': u['name']})
+                        all_users.append(u)
                     
                     if not result.get("has_more"):
                         break
@@ -120,6 +120,29 @@ class DingTalkClient:
                 logger.error(f"Error getting users: {e}")
                 raise
         return all_users
+
+
+    def get_user_detail(self, userid):
+        """
+        Fetch details for a single user via /topapi/v2/user/get.
+        Returns full user dict or None on failure.
+        """
+        url = "https://oapi.dingtalk.com/topapi/v2/user/get"
+        token = self.get_access_token()
+        params = {"access_token": token}
+        payload = {"userid": str(userid)}
+        
+        try:
+            response = requests.post(url, params=params, json=payload)
+            data = response.json()
+            if data.get("errcode") == 0:
+                return data.get("result", {})
+            else:
+                logger.warning(f"Failed to get user detail for {userid}: {data}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting user detail for {userid}: {e}")
+            raise
 
     def get_user_visible_process_codes(self, userid):
         """
